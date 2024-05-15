@@ -1,0 +1,274 @@
+---
+title: "Using a Multilevel Structure to Model Lemur Weight"
+author: "Drew Gille" 
+format: pdf
+execute: 
+  echo: false
+  warning: false
+  message: false
+---
+
+# Introduction
+
+Lemurs are an interesting animal in that there are great differences between the different types of lemurs. We will explore, in particular, the differences in weight of lemurs. The type of lemur, as we will see, is one factor which affects the weight, but we will explore others as well. Particularly, we will explore what particular factors seem to influence weight the most, after controlling for certain random factors.
+
+# Data
+
+```{r}
+#load packages
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+library(tidymodels)
+library(dplyr)
+library(ggplot2)
+library(lme4)
+library(pscl)
+library(Stat2Data)
+library(MASS)
+library(margins)
+library(broom.mixed)
+```
+
+```{r}
+#load data
+lemurs <- read_csv('data/lemur_data.csv')
+
+head(lemurs)
+```
+
+Our dataset contains data for various types of lemurs. Individual lemurs are repeated in the dataset, as we have observations for each lemur across the span of its life. The variables we are interested in are as follows:
+
+-   `weight_g`: the weight in grams of a lemur
+
+-   `dlc_id`: unique ID for an individual lemur
+
+-   `taxon`: taxonomical code indicating genus and species
+
+-   `age_at_wt_mo`: age in months
+
+-   `sex`: biological sex; male or female
+
+-   `preg_status`: indicates whether a lemur is pregnant
+
+First, we want to see if the trend of weight versus age varies by taxon.
+
+```{r}
+# spaghetti plots for height vs age faceted by taxon
+ggplot(data=lemurs, aes(x = age_at_wt_mo, y = weight_g))+
+  geom_line(aes(group = dlc_id), color = "lightgray")+
+  geom_smooth(color = "black", linewidth = 1, method = "loess", se = FALSE)+
+  facet_wrap(~taxon)
+```
+
+Above, we can see that the trend of weight versus age indeed varies by taxon. This suggests that a multilevel structure may be useful.
+
+Before we fit a model, we will explore some variables as potential predictors.
+
+```{r}
+# weight by sex faceted by taxon
+lemurs %>%
+  group_by(dlc_id) %>%
+  mutate(max_weight_g = max(weight_g)) %>%
+  group_by(taxon, sex) %>%
+  summarize(mean_max_weight_g = mean(max_weight_g))
+```
+
+We can see that the maximum weight of a lemur varies depending on sex. How it varies is different across taxons---females are heavier on average for some taxons, while males are heavier for others. Because the effect of sex can be so different for different taxons, the corresponding random effect would take on a lot of the variance in weight. Perhaps we construct a two-level model and use the two taxon with the most data as predictors. This way, we could place more emphasis on our predictors.
+
+```{r}
+lemurs %>%
+  group_by(taxon) %>%
+  summarize(n = n()) %>%
+  arrange(desc(n))
+```
+
+We will focus on the 2 taxon with the most data: MMUR and PCOQ. We will include these as estimated effects in the model.
+
+```{r}
+lemurs <- lemurs %>%
+  filter(taxon %in% c('MMUR', 'PCOQ'))
+```
+
+Thus, we will construct a two-level multiple linear regression model. The response variable will be the weight in grams of a lemur. The level-one observational unit is a time-point in a lemur's life, whereas the level-two observational unit is the lemur. Instead of having taxon as a level-three observational unit, we will include it as a level-two predictor variable. This way, we can obtain a more precise understanding of the effect of the taxons of interest.
+
+With this structure in mind, we will continue to explore predictor variables.
+
+Back to exploring sex:
+
+```{r}
+#weight vs sex
+ggplot(lemurs) + 
+  geom_bar(aes(x = sex, y = weight_g, fill = as.factor(sex)), 
+           position = "dodge", stat = "summary")+
+  facet_grid(~taxon)
+```
+
+```{r}
+# weight by sex faceted by taxon
+lemurs %>%
+  group_by(dlc_id) %>%
+  mutate(max_weight_g = max(weight_g)) %>%
+  group_by(taxon, sex) %>%
+  summarize(mean_max_weight_g = mean(max_weight_g))
+```
+
+Above, we see that the sex of a lemur seems to have an effect on weight for PCOQ, but not as much for MMUR.
+
+Moving forward, we will explore the effect of pregnancy on weight. It would make sense if pregnant female adults were heavier than non-pregnant female adults, but this difference in weight may vary by taxon. Thus, we will explore this difference below.
+
+```{r}
+# weight by pregnancy status faceted by taxon (only including females)
+lemurs %>%
+  group_by(dlc_id, preg_status) %>%
+  filter(sex == 'F',
+         age_category == 'adult') %>%
+  ggplot() + 
+  geom_bar(aes(x = preg_status, y = weight_g, fill = as.factor(preg_status)), 
+           position = "dodge", stat = "summary")+
+  facet_grid(~taxon)
+```
+
+```{r}
+# weight by pregnancy status faceted by taxon
+lemurs %>%
+  group_by(dlc_id, preg_status) %>%
+  mutate(max_weight_g = max(weight_g)) %>%
+  group_by(taxon, preg_status) %>%
+  summarize(mean_max_weight_g = mean(max_weight_g))
+```
+
+Indeed, weight by pregnancy varies greatly depending on taxon, as it appears to have a negative effect on weight for MMUR and a positive effect for PCOQ. In general, pregnancy, does indeed seem to have an effect on weight.
+
+# Methodology
+
+Now that we have explored some predictors, we can construct a model. In addition to there being variance in weight due to the factors we include in the model, there is extra variance both between observations of the same lemur and between different lemurs. Thus, we will use a multilevel regression model. The structure of our model is as follows:
+
+-   Response Variable - Weight of a lemur in hundred of grams
+
+-   Level 1 Observational Units - Time-point in a lemur's life
+
+-   Level 2 Observational Units - Lemur
+
+Age and whether a lemur is pregnant are the level 1 predictor variables because these vary for each lemur depending on the time their weight was observed.
+
+The level two predictor variables are sex and taxon because these do not change throughout a lemur's life.
+
+We will need to filter the data before we construct a model.
+
+```{r}
+#filter out observations where sex is missing
+lemurs <- lemurs %>%
+  filter(sex != 'ND')
+```
+
+```{r}
+#model 1
+model1 <- lmer(weight_g/100 ~ taxon + sex + preg_status + taxon:preg_status +
+                 age_at_wt_mo + age_at_wt_mo:taxon +
+                 age_at_wt_mo:sex + (1|age_at_wt_mo) + (1|dlc_id),
+               REML=T, data=lemurs)
+
+tidy(model1) %>%
+  kable(digits = 2)
+```
+
+(note: we do not want a coefficient estimate for sex:preg_status because there is no data for a pregnant male lemur)
+
+The estimate for sexM is not very significant because, as we saw in the EDA, the effect of this predictor varies greatly depending on taxon. Thus, we will add an interaction term between sex and taxon the model.
+
+```{r}
+#model 2
+model2 <- lmer(weight_g/100 ~ taxon + sex + taxon:sex + preg_status + taxon:preg_status +
+                 age_at_wt_mo + age_at_wt_mo:taxon +
+                 age_at_wt_mo:sex + (1|age_at_wt_mo) + (1|dlc_id),
+               REML=T, data=lemurs)
+
+tidy(model2) %>%
+  kable(digits = 2)
+```
+
+Using parametric bootstrap confidence intervals, we will compare the two models to see which yields more precise estimates.
+
+```{r}
+#confidence intervals
+ci1 <- confint(model1, method = "boot", nsim=10, oldNames = FALSE)
+ci1 %>%
+  kable(digits=4)
+ci2 <- confint(model2, method = "boot", nsim=10, oldNames = FALSE)
+ci2 %>%
+  kable(digits=4)
+```
+
+```{r}
+#size of CI's
+diff1 <- ci1[, "97.5 %"] - ci1[, "2.5 %"]
+diff2 <- ci2[, "97.5 %"] - ci2[, "2.5 %"]
+```
+
+```{r}
+#size of CI 1
+diff1
+```
+
+```{r}
+#size of CI 2
+diff2
+```
+
+Of the shared terms between the models some are more precise and some are less precise across models. Before making any conclusions, we will compare their AIC's and BIC's.
+
+```{r}
+#AIC and BIC
+AIC(model1)
+BIC(model1)
+AIC(model2)
+BIC(model2)
+```
+
+Model 2 has lower AIC and (barely) higher BIC. The increase in BIC is likely due to adding an extra term. All things considered, we will decide to choose model 2 for further inference.
+
+The notation for this model is as follows:
+
+Level 1:
+
+$$
+y_{ij}=a_i+b_ix_3+c_ix_4+\epsilon_{ij}
+$$
+
+Level 2:
+
+$$
+a_i=\alpha_0+\alpha_1x_1+\alpha_2x_2+\alpha_3x_1x_2+u_i \\ b_i=\beta_0+\beta_1x_1+\beta_2x_2+v_i \\ c_i=\gamma_0+\gamma_1x_1+\gamma_2x_2+w_i
+$$
+
+Composite:
+
+$$
+y_{ij}=\alpha_0+\alpha_1x_1+\alpha_2x_2+\alpha_3x_1x_2+\beta_0x_3+\beta_1x_1x_3+\gamma_0x_4+\gamma_1x_1x_4+\gamma_2x_2x_4+u_i+v_i+w_i+\epsilon_{ij}
+$$
+
+where $y_{ij}$ is the weight of lemur i at time-point j, $x_1$ is taxon, $x_2$ is sex, $x_3$ is pregnancy status, and $x_4$ is age. $a_i$ is the intercept, $b_i$ is the effect of pregnancy status, and $c_i$ is the effect of age. $u_i$ represents the variance in the intercept after controlling for taxon and sex. $v_i$ represents the variance in the effect of pregnancy status after controlling for taxon and sex. $w_i$ represents the variance in the effect of age after controlling for taxon and sex.
+
+# Results
+
+Below, we see the results from our chosen model.
+
+```{r}
+tidy(model2) %>%
+  kable(digits = 2)
+```
+
+One of the strongest predictors in predicting weight is whether the lemur is of taxon PCOQ. If so, it is expected to be 1927 grams heavier, holding all else constant. The taxonPCOQ:preg_statusP term is also very high. It suggests that the effect of being pregnant on a lemur's weight is expected to be 576 grams heavier if it is of taxon PCOQ compared to if it is of taxon MMUR, holding all else constant.
+
+We see that the within-lemur standard deviation (deviation of weight between different time-points for the same lemur) is 470 grams, which is very high. However, this makes sense when we realize that lemurs, like most animals are more prone to growth during certain time periods of their life i.e. when they are younger. Thus, weights will vary more between earlier ages than between older ages.
+
+Likewise, the lemur-to-lemur standard deviation in weight is also high, with a value of 453 grams. This could possibly be due to the fact that some observed lemurs have lived a whole life and died, while others may be newborns. Thus, we have more complete data for the former, while we have incomplete data for the latter.
+
+Additionally, the residual standard deviation for weight is 463 grams. This could be due to the fact that there could be other important factors that we do not have data for, such as diet, exercise, or whether a lemur has an illness.
+
+# Discussion + Conclusion
+
+We find that some of the most important predictors of a lemur's weight are taxon, pregnancy status, age, and sex. However, as we already knew the importance of these predictors varies by taxon. The male-to-female difference in weight in one taxon could be very different from that of another. Likewise, the effect of age on weight could vary just as extremely across taxons. In addition to this, there is random variance between observations for a single lemur and across different lemurs. Our multilevel model accounted for these random effects.
+
+Further research could be done to improve these results. Perhaps researchers could filter the data such that it includes certain ages for ALL observations. This could help reduce both the within- and across- lemur standard deviation in weight that we see above. Additionally, more data could be collected on factors such as diet and illness to further explain differences in weight. Also, this research is limited in that it focuses only on two types of lemurs. Further research could include more taxons or perhaps find an alternative way to categorize them.
